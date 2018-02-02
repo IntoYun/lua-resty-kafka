@@ -57,6 +57,7 @@ end
 
 
 local function produce_encode(self, topic_partitions)
+    logger:log(ngx.DEBUG, "==> producer_encode ")
     local req = request:new(request.ProduceRequest,
                             correlation_id(self), self.client.client_id)
 
@@ -72,6 +73,7 @@ local function produce_encode(self, topic_partitions)
             req:int32(partition_id)
 
             -- MessageSetSize and MessageSet
+            logger:log(ngx.DEBUG, "==> producer_encode call req:message_set()")
             req:message_set(buffer.queue, buffer.index)
         end
     end
@@ -105,11 +107,13 @@ end
 
 
 local function choose_partition(self, topic, key)
+    logger:log(ngx.DEBUG, "==> producer:choose_partition call client:fetch_metadata ")
     local brokers, partitions = self.client:fetch_metadata(topic)
     if not brokers then
         return nil, partitions
     end
 
+    logger:log(ngx.DEBUG, "==> producer:choose_partition call partitioner() ")
     return self.partitioner(key, partitions.num, self.correlation_id)
 end
 
@@ -135,14 +139,19 @@ end
 
 
 local function _send(self, broker_conf, topic_partitions)
+    logger:log(ngx.DEBUG, "==> producer _send() ")
     local sendbuffer = self.sendbuffer
     local resp, retryable = nil, true
 
+    logger:log(ngx.DEBUG, "==> producer new broker... ")
     local bk, err = broker:new(broker_conf.host, broker_conf.port, self.socket_config)
     if bk then
         local req = produce_encode(self, topic_partitions)
+        logger:log(ngx.DEBUG, "==> producer_encode req: ", req)
 
+        logger:log(ngx.DEBUG, "==> producer call broker:send_receive() ")
         resp, err, retryable = bk:send_receive(req)
+        logger:log(ngx.DEBUG, "==> producer call broker:send_receive() done! resp: ", resp)
         if resp then
             local result = produce_decode(resp)
 
@@ -184,10 +193,13 @@ end
 
 
 local function _batch_send(self, sendbuffer)
+    logger:log(ngx.DEBUG, "==> producer _batch_send() ")
     local try_num = 1
     while try_num <= self.max_retry do
         -- aggregator
+        logger:log(ngx.DEBUG, "==> producer _batch_send() call sendbuffer:aggregator(self.client)")
         local send_num, sendbroker = sendbuffer:aggregator(self.client)
+        logger:log(ngx.DEBUG, "==> sendbuffer:aggregator finished. task num: ", send_num/2)
         if send_num == 0 then
             break
         end
@@ -195,13 +207,16 @@ local function _batch_send(self, sendbuffer)
         for i = 1, send_num, 2 do
             local broker_conf, topic_partitions = sendbroker[i], sendbroker[i + 1]
 
+            logger:log(ngx.DEBUG, "==> producer _batch_send() call _send() for each topic.")
             _send(self, broker_conf, topic_partitions)
         end
 
         if sendbuffer:done() then
+            logger:log(ngx.DEBUG, "==> sendbuffer all done()", ngx.now())
             return true
         end
 
+        logger:log(ngx.DEBUG, "==> producer _batch_send() maybe failed, retry procedure triggered! call client:refresh() AKA client:_fetch_metadata() to update metadata")
         self.client:refresh()
 
         try_num = try_num + 1
@@ -216,6 +231,8 @@ local _flush_buffer
 
 
 local function _flush(premature, self)
+    ngx.log(ngx.DEBUG, "==> producer local _flush() called at: ", ngx.now())
+    logger:log(ngx.DEBUG, "==> producer local _flush(): ", ngx.now())
     if not _flush_lock(self) then
         if debug then
             ngx_log(DEBUG, "previous flush not finished")
@@ -232,6 +249,7 @@ local function _flush(premature, self)
             break
         end
 
+        logger:log(ngx.DEBUG, "==> pop task from ringbuffer to sendbuffer by iterate topic: ", topic)
         local partition_id, err = choose_partition(self, topic, key)
         if not partition_id then
             partition_id = -1
@@ -243,6 +261,7 @@ local function _flush(premature, self)
         end
     end
 
+    logger:log(ngx.DEBUG, "==> producer local _flush() call _batch_send()", ngx.now())
     local all_done = _batch_send(self, sendbuffer)
 
     if not all_done then
@@ -279,6 +298,7 @@ end
 
 
 _flush_buffer = function (self)
+    logger:log(ngx.DEBUG, "==> producer:_flush_buffer(), call _flush in backend, return immediately")
     local ok, err = timer_at(0, _flush, self)
     if not ok then
         ngx_log(ERR, "failed to create timer at _flush_buffer, err: ", err)
@@ -288,12 +308,15 @@ end
 
 local _timer_flush
 _timer_flush = function (premature, self, time)
+    ngx.log(ngx.DEBUG, "==> producer:_timer_flush() called at: ", ngx.now())
+    logger:log(ngx.DEBUG, "==> producer:_timer_flush(), call _flush_buffer() first")
     _flush_buffer(self)
 
     if premature then
         return
     end
 
+    logger:log(ngx.DEBUG, "==> _flush_buffer() returned. next call will be ", time, " seconds later")
     local ok, err = timer_at(time, _timer_flush, self, time)
     if not ok then
         ngx_log(ERR, "failed to create timer at _timer_flush, err: ", err)
@@ -302,6 +325,7 @@ end
 
 
 function _M.new(self, broker_list, producer_config, cluster_name)
+    logger:log(ngx.DEBUG, "==> new a producer...")
     local name = cluster_name or DEFAULT_CLUSTER_NAME
     local opts = producer_config or {}
     local async = opts.producer_type == "async"
@@ -309,7 +333,9 @@ function _M.new(self, broker_list, producer_config, cluster_name)
         return cluster_inited[name]
     end
 
+    logger:log(ngx.DEBUG, "==> producer:new() call client:new()...")
     local cli = client:new(broker_list, producer_config)
+    logger:log(ngx.DEBUG, "==> producer:new() call client:new() done!")
     local p = setmetatable({
         client = cli,
         correlation_id = 1,
@@ -329,6 +355,7 @@ function _M.new(self, broker_list, producer_config, cluster_name)
     }, mt)
 
     if async then
+        logger:log(ngx.DEBUG, "==> producer:new() is async, start _timer_flush")
         cluster_inited[name] = p
         _timer_flush(nil, p, (opts.flush_time or 1000) / 1000)  -- default 1s
     end
@@ -338,21 +365,25 @@ end
 
 -- offset is cdata (LL in luajit)
 function _M.send(self, topic, key, message)
+    logger:log(ngx.DEBUG, "==> producer:send()")
     if self.async then
         local ringbuffer = self.ringbuffer
 
         local ok, err = ringbuffer:add(topic, key, message)
+        logger:log(ngx.DEBUG, "==> async producer add a message to ringbuffer: ", ngx.now())
         if not ok then
             return nil, err
         end
 
         if not self.flushing and (ringbuffer:need_send() or is_exiting()) then
+            logger:log(ngx.DEBUG, "==> invoke _flush_buffer immediately by produce:send()")
             _flush_buffer(self)
         end
 
         return true
     end
 
+    logger:log(ngx.DEBUG, "==> producer:send() call choose_partition")
     local partition_id, err = choose_partition(self, topic, key)
     if not partition_id then
         return nil, err
@@ -361,7 +392,9 @@ function _M.send(self, topic, key, message)
     local sendbuffer = self.sendbuffer
     sendbuffer:add(topic, partition_id, key, message)
 
+    logger:log(ngx.DEBUG, "==> sync producer call _batch_send()")
     local ok = _batch_send(self, sendbuffer)
+    logger:log(ngx.DEBUG, "==> sync producer call _batch_send() ok: ", ok)
     if not ok then
         sendbuffer:clear(topic, partition_id)
         return nil, sendbuffer:err(topic, partition_id)
@@ -372,6 +405,7 @@ end
 
 
 function _M.flush(self)
+    logger:log(ngx.DEBUG, "==> producer call flush(): ", ngx.now())
     return _flush(nil, self)
 end
 

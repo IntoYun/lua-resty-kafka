@@ -143,13 +143,16 @@ end
 
 
 function _M.aggregator(self, client)
+    logger:log(ngx.DEBUG, "==> sendbuffer: aggregator() ")
     local num = 0
     local sendbroker = {}
     local brokers = {}
 
     local i = 1
     for topic, partition_id, queue in self:loop() do
+        logger:log(ngx.DEBUG, "==> with topic: ", topic, ", partition_id: ", partition_id)
         if queue.retryable then
+            logger:log(ngx.DEBUG, "==> sendbuffer: aggregator() call client:choose_broker()")
             local broker_conf, err = client:choose_broker(topic, partition_id)
             if not broker_conf then
                 self:err(topic, partition_id, err, true)

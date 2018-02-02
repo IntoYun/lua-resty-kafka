@@ -113,7 +113,9 @@ end
 
 
 local function _fetch_metadata(self, new_topic)
+    logger:log(ngx.DEBUG, "==> _fetch_metadata with topic: ", new_topic)
     local topics, num = {}, 0
+    logger:log(ngx.DEBUG, "==> self.topic_partitions: ", self.topic_partitions)
     for tp, _p in pairs(self.topic_partitions) do
         num = num + 1
         topics[num] = tp
@@ -124,7 +126,9 @@ local function _fetch_metadata(self, new_topic)
         topics[num] = new_topic
     end
 
+    logger:log(ngx.DEBUG, "==> num: ", num)
     if num == 0 then
+        logger:log(ngx.DEBUG, "==> num equals to 0, no topic to refresh , so return 'not topic'")
         return nil, "not topic"
     end
 
@@ -133,16 +137,21 @@ local function _fetch_metadata(self, new_topic)
     local req = metadata_encode(self.client_id, topics, num)
 
     for i = 1, #broker_list do
+        logger:log(ngx.DEBUG, "==> fetch from broker list: ", broker_list)
         local host, port = broker_list[i].host, broker_list[i].port
         local bk = broker:new(host, port, sc)
 
         local resp, err = bk:send_receive(req)
         if not resp then
+            logger:log(ngx.DEBUG, "==> fetch metadata err: ", err)
             ngx_log(INFO, "broker fetch metadata failed, err:", err, host, port)
         else
+            logger:log(ngx.DEBUG, "==> fetch metadata resp: ", resp)
             local brokers, topic_partitions = metadata_decode(resp)
             self.brokers, self.topic_partitions = brokers, topic_partitions
 
+            logger:log(ngx.DEBUG, "==> fetch metadata brokers: ", brokers)
+            logger:log(ngx.DEBUG, "==> fetch metadata topic_partitions: ", topic_partitions)
             return brokers, topic_partitions
         end
     end
@@ -158,6 +167,8 @@ local function meta_refresh(premature, self, interval)
         return
     end
 
+    ngx.log(ngx.DEBUG, "==> client refresh metadata at: ", ngx.now())
+    logger:log(ngx.DEBUG, "==> meta_refresh call _fetch_metadata()")
     _fetch_metadata(self)
 
     local ok, err = timer_at(interval, meta_refresh, self, interval)
@@ -168,6 +179,7 @@ end
 
 
 function _M.new(self, broker_list, client_config)
+    logger:log(ngx.DEBUG, "==> new a client...")
     local opts = client_config or {}
     local socket_config = {
         socket_timeout = opts.socket_timeout or 3000,
@@ -187,6 +199,7 @@ function _M.new(self, broker_list, client_config)
     }, mt)
 
     if opts.refresh_interval then
+        logger:log(ngx.DEBUG, "==> new a client check refresh_interval setted, call meta_refresh()")
         meta_refresh(nil, cli, opts.refresh_interval / 1000) -- in ms
     end
 
@@ -195,11 +208,14 @@ end
 
 
 function _M.fetch_metadata(self, topic)
+    logger:log(ngx.DEBUG, "==> client call _metadata_cache ")
     local brokers, partitions = _metadata_cache(self, topic)
+    logger:log(ngx.DEBUG, "==> client call _metadata_cache brokers: ", brokers)
     if brokers then
         return brokers, partitions
     end
 
+    logger:log(ngx.DEBUG, "==> no _metadata_cache real fetch ")
     _fetch_metadata(self, topic)
 
     return _metadata_cache(self, topic)
@@ -207,6 +223,7 @@ end
 
 
 function _M.choose_broker(self, topic, partition_id)
+    logger:log(ngx.DEBUG, "==> client:choose_broker() ")
     local brokers, partitions = self:fetch_metadata(topic)
     if not brokers then
         return nil, partitions
